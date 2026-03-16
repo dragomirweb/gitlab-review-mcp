@@ -1,0 +1,19 @@
+{
+  "$schema": "https://opencode.ai/config.json",
+  "mcp": {
+    "gitlab-mcp": {
+      "type": "local",
+      "command": [
+        "bun",
+        "run",
+        "src/index.ts"
+      ],
+      "environment": {
+        "GITLAB_PAT": "{env:GITLAB_PAT}",
+        "GITLAB_BASE_URL": "{env:GITLAB_BASE_URL}",
+        "GITLAB_PROJECT_ID": "{env:GITLAB_PROJECT_ID}"
+      },
+      "enabled": true,
+    },
+  },
+}
