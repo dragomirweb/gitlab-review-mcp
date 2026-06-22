@@ -184,10 +184,10 @@ Priority: explicit param > runtime setting > env var.
 
 | Tool | Description |
 |---|---|
-| `start_review` | Start or resume a review session (detects re-reviews, tracks SHA) |
+| `start_review` | Start or resume an active review session; starts a fresh session with prior context after completed reviews |
 | `add_review_comment` | Add a comment or suggestion to the review (posts to GitLab inline) |
 | `get_review_status` | Get review progress with item details and resolution status |
-| `complete_review` | Finalize review: update status, post summary, set labels, approve |
+| `complete_review` | Finalize review: update status, post summary, set labels, approve, or request changes |
 
 ### Settings Tools (2)
 
@@ -206,13 +206,18 @@ The typical review workflow:
 3. get_mr_diff         -- Read the diff (auto-filters generated files)
 4. get_mr_file_content -- Read full files for context
 5. add_review_comment  -- Post inline comments and suggestions
-6. complete_review     -- Post summary, set labels, approve/request changes
+6. complete_review     -- Post summary, set labels, approve, or request changes
 ```
 
-On re-review, `start_review` automatically detects previous sessions and provides:
+On re-review, `start_review` automatically detects review history and provides:
 - Resolution status of prior comments
 - Whether new commits have been pushed since last review
 - A diff of changes since the last review via `get_mr_changes_since`
+
+Completed sessions (`approved`, `requested_changes`, or `closed`) are treated as
+historical context, not writable sessions. If no active session exists,
+`start_review` creates a fresh `in_progress` session and includes the latest
+completed session under `previous_session` / `previous_review`.
 
 ## Architecture
 

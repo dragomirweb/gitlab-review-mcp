@@ -16,6 +16,7 @@ export interface CreateSessionInput {
   project_id: string
   source_branch: string
   head_sha?: string
+  previous_head_sha?: string
 }
 
 export interface CreateReviewItemInput {
@@ -49,13 +50,14 @@ export class ReviewQueries {
   // Review Sessions
   createSession(input: CreateSessionInput): ReviewSession {
     const result = this.db.run(
-      `INSERT INTO review_sessions (mr_iid, project_id, source_branch, head_sha)
-       VALUES (?, ?, ?, ?)`,
+      `INSERT INTO review_sessions (mr_iid, project_id, source_branch, head_sha, previous_head_sha)
+       VALUES (?, ?, ?, ?, ?)`,
       [
         input.mr_iid,
         input.project_id,
         input.source_branch,
         input.head_sha ?? null,
+        input.previous_head_sha ?? null,
       ],
     )
     return this.getSessionById(Number(result.lastInsertRowid))!
@@ -77,7 +79,20 @@ export class ReviewQueries {
       .query<ReviewSession, [string, number]>(
         `SELECT * FROM review_sessions 
        WHERE project_id = ? AND mr_iid = ? AND status IN ('in_progress', 'pending_changes')
-       ORDER BY started_at DESC LIMIT 1`,
+       ORDER BY started_at DESC, id DESC LIMIT 1`,
+      )
+      .get(project_id, mr_iid)
+  }
+
+  getLatestSessionByMR(
+    project_id: string,
+    mr_iid: number,
+  ): ReviewSession | null {
+    return this.db
+      .query<ReviewSession, [string, number]>(
+        `SELECT * FROM review_sessions
+       WHERE project_id = ? AND mr_iid = ?
+       ORDER BY started_at DESC, id DESC LIMIT 1`,
       )
       .get(project_id, mr_iid)
   }
@@ -90,7 +105,20 @@ export class ReviewQueries {
       .query<ReviewSession, [string, string]>(
         `SELECT * FROM review_sessions 
        WHERE project_id = ? AND source_branch = ? AND status IN ('in_progress', 'pending_changes')
-       ORDER BY started_at DESC LIMIT 1`,
+       ORDER BY started_at DESC, id DESC LIMIT 1`,
+      )
+      .get(project_id, source_branch)
+  }
+
+  getLatestSessionByBranch(
+    project_id: string,
+    source_branch: string,
+  ): ReviewSession | null {
+    return this.db
+      .query<ReviewSession, [string, string]>(
+        `SELECT * FROM review_sessions
+       WHERE project_id = ? AND source_branch = ?
+       ORDER BY started_at DESC, id DESC LIMIT 1`,
       )
       .get(project_id, source_branch)
   }

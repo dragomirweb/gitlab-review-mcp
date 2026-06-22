@@ -84,6 +84,19 @@ describe('Review Sessions', () => {
     expect(session.previous_head_sha).toBeNull()
   })
 
+  test('createSession stores previous_head_sha when provided', () => {
+    const session = queries.createSession({
+      mr_iid: 42,
+      project_id: 'p',
+      source_branch: 'b',
+      head_sha: 'sha-v2',
+      previous_head_sha: 'sha-v1',
+    })
+
+    expect(session.head_sha).toBe('sha-v2')
+    expect(session.previous_head_sha).toBe('sha-v1')
+  })
+
   test('getSessionById returns session by ID', () => {
     const created = queries.createSession({
       mr_iid: 1,
@@ -143,6 +156,50 @@ describe('Review Sessions', () => {
     expect(found).toBeNull()
   })
 
+  test('getActiveSessionByMR ignores requested_changes sessions', () => {
+    const session = queries.createSession({
+      mr_iid: 1,
+      project_id: 'p',
+      source_branch: 'b',
+    })
+    queries.updateSessionStatus(session.id, 'requested_changes')
+    const found = queries.getActiveSessionByMR('p', 1)
+    expect(found).toBeNull()
+  })
+
+  test('getLatestSessionByMR finds final sessions', () => {
+    const session = queries.createSession({
+      mr_iid: 1,
+      project_id: 'p',
+      source_branch: 'b',
+    })
+    queries.updateSessionStatus(session.id, 'requested_changes')
+
+    const found = queries.getLatestSessionByMR('p', 1)
+    expect(found).not.toBeNull()
+    expect(found!.id).toBe(session.id)
+    expect(found!.status).toBe('requested_changes')
+  })
+
+  test('getLatestSessionByMR returns the newest session for the MR', () => {
+    const first = queries.createSession({
+      mr_iid: 1,
+      project_id: 'p',
+      source_branch: 'b',
+    })
+    queries.updateSessionStatus(first.id, 'requested_changes')
+
+    const second = queries.createSession({
+      mr_iid: 1,
+      project_id: 'p',
+      source_branch: 'b',
+    })
+
+    const found = queries.getLatestSessionByMR('p', 1)
+    expect(found!.id).toBe(second.id)
+    expect(found!.status).toBe('in_progress')
+  })
+
   test('getActiveSessionByBranch finds session by branch', () => {
     queries.createSession({
       mr_iid: 1,
@@ -161,6 +218,20 @@ describe('Review Sessions', () => {
       source_branch: 'feat/a',
     })
     expect(queries.getActiveSessionByBranch('p', 'feat/b')).toBeNull()
+  })
+
+  test('getLatestSessionByBranch finds final sessions', () => {
+    const session = queries.createSession({
+      mr_iid: 1,
+      project_id: 'p',
+      source_branch: 'feat/branch',
+    })
+    queries.updateSessionStatus(session.id, 'closed')
+
+    const found = queries.getLatestSessionByBranch('p', 'feat/branch')
+    expect(found).not.toBeNull()
+    expect(found!.id).toBe(session.id)
+    expect(found!.status).toBe('closed')
   })
 
   test('updateSessionStatus changes status', () => {

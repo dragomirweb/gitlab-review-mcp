@@ -47,6 +47,17 @@ function resetMockClient() {
       Promise.resolve({ labels: ['reviewed'] }),
     ),
     approveMergeRequest: mock(() => Promise.resolve({})),
+    requestMergeRequestChanges: mock(() =>
+      Promise.resolve({
+        mergeRequest: {
+          id: 'gid://gitlab/MergeRequest/1',
+          iid: '42',
+          webUrl:
+            'https://gitlab.example.com/group/project/-/merge_requests/42',
+        },
+        errors: [],
+      }),
+    ),
   }
 }
 
@@ -221,6 +232,52 @@ describe('Review tool handlers', () => {
       expect(parsed.all_resolved).toBe(true)
       expect(parsed.items[0].gitlab_resolved).toBe(true)
     })
+
+    test('starts a fresh session with previous review context after completion', async () => {
+      const startHandler = server.getHandler('start_review')
+      await startHandler({ project_id: 'p', mr_iid: 42 })
+
+      const addHandler = server.getHandler('add_review_comment')
+      await addHandler({
+        session_id: 1,
+        content: 'Bug found here',
+        type: 'comment',
+      })
+
+      const completeHandler = server.getHandler('complete_review')
+      await completeHandler({
+        session_id: 1,
+        status: 'requested_changes',
+      })
+
+      mockClient.getMergeRequest = mock(() =>
+        Promise.resolve({
+          id: 1,
+          iid: 42,
+          source_branch: 'feature',
+          diff_refs: {
+            head_sha: 'head222',
+            base_sha: 'base',
+            start_sha: 'start',
+          },
+        }),
+      )
+
+      const result = await startHandler({ project_id: 'p', mr_iid: 42 })
+      const parsed = JSON.parse(result.content[0].text)
+
+      expect(parsed.is_rereview).toBe(true)
+      expect(parsed.resumed_existing_session).toBe(false)
+      expect(parsed.has_new_commits).toBe(true)
+      expect(parsed.session.id).toBe(2)
+      expect(parsed.session.status).toBe('in_progress')
+      expect(parsed.session.head_sha).toBe('head222')
+      expect(parsed.session.previous_head_sha).toBe('head111')
+      expect(parsed.previous_session.id).toBe(1)
+      expect(parsed.previous_session.status).toBe('requested_changes')
+      expect(parsed.previous_review.total_items).toBe(1)
+      expect(parsed.previous_review.unresolved_items).toBe(1)
+    })
   })
 
   // -----------------------------------------------------------------------
@@ -345,6 +402,25 @@ describe('Review tool handlers', () => {
       ).rejects.toThrow('Review session 999 not found')
     })
 
+    test('throws when session is already completed', async () => {
+      const startHandler = server.getHandler('start_review')
+      await startHandler({ project_id: 'p', mr_iid: 42 })
+
+      const q = getQueries()
+      q.updateSessionStatus(1, 'requested_changes')
+
+      const handler = server.getHandler('add_review_comment')
+      await expect(
+        handler({
+          session_id: 1,
+          content: 'new comment',
+          type: 'comment',
+        }),
+      ).rejects.toThrow(
+        'Cannot add review comments for review session 1 because it is requested_changes',
+      )
+    })
+
     test('builds GitLab position when provided', async () => {
       const startHandler = server.getHandler('start_review')
       await startHandler({ project_id: 'p', mr_iid: 42 })
@@ -431,6 +507,34 @@ describe('Review tool handlers', () => {
 
       const parsed = JSON.parse(result.content[0].text)
       expect(parsed.found).toBe(false)
+    })
+
+    test('falls back to latest completed session by mr_iid', async () => {
+      const startHandler = server.getHandler('start_review')
+      await startHandler({ project_id: 'p', mr_iid: 42 })
+
+      const addHandler = server.getHandler('add_review_comment')
+      await addHandler({
+        session_id: 1,
+        content: 'Fix this bug',
+        type: 'comment',
+      })
+
+      const completeHandler = server.getHandler('complete_review')
+      await completeHandler({
+        session_id: 1,
+        status: 'requested_changes',
+      })
+
+      const handler = server.getHandler('get_review_status')
+      const result = await handler({ project_id: 'p', mr_iid: 42 })
+
+      const parsed = JSON.parse(result.content[0].text)
+      expect(parsed.found).toBe(true)
+      expect(parsed.is_active_session).toBe(false)
+      expect(parsed.session.status).toBe('requested_changes')
+      expect(parsed.total_items).toBe(1)
+      expect(parsed.message).toContain('showing latest requested_changes')
     })
 
     test('includes item details with resolution status', async () => {
@@ -554,6 +658,74 @@ describe('Review tool handlers', () => {
       expect(parsed.actions).not.toContain('mr_approved')
     })
 
+    test('requests changes on GitLab when status=requested_changes', async () => {
+      const startHandler = server.getHandler('start_review')
+      await startHandler({ project_id: 'p', mr_iid: 42 })
+
+      const handler = server.getHandler('complete_review')
+      const result = await handler({
+        session_id: 1,
+        status: 'requested_changes',
+        summary_comment: 'Please address the suggested changes.',
+      })
+
+      expect(mockClient.requestMergeRequestChanges).toHaveBeenCalledWith(
+        'p',
+        42,
+      )
+      expect(mockClient.createMergeRequestNote).toHaveBeenCalledWith('p', 42, {
+        body: 'Please address the suggested changes.',
+      })
+      const parsed = JSON.parse(result.content[0].text)
+      expect(parsed.status).toBe('requested_changes')
+      expect(parsed.actions).toContain('changes_requested')
+      expect(parsed.actions).toContain('summary_comment_posted')
+
+      const q = getQueries()
+      const session = q.getSessionById(1)
+      expect(session!.status).toBe('requested_changes')
+    })
+
+    test('keeps local status unchanged when GitLab request changes fails', async () => {
+      const startHandler = server.getHandler('start_review')
+      await startHandler({ project_id: 'p', mr_iid: 42 })
+      mockClient.requestMergeRequestChanges = mock(() =>
+        Promise.reject(
+          new Error('GitLab request changes failed: Reviewer not found'),
+        ),
+      )
+
+      const handler = server.getHandler('complete_review')
+      await expect(
+        handler({
+          session_id: 1,
+          status: 'requested_changes',
+        }),
+      ).rejects.toThrow('GitLab request changes failed: Reviewer not found')
+
+      const q = getQueries()
+      const session = q.getSessionById(1)
+      expect(session!.status).toBe('in_progress')
+    })
+
+    test('throws when completing an already completed session', async () => {
+      const startHandler = server.getHandler('start_review')
+      await startHandler({ project_id: 'p', mr_iid: 42 })
+
+      const q = getQueries()
+      q.updateSessionStatus(1, 'requested_changes')
+
+      const handler = server.getHandler('complete_review')
+      await expect(
+        handler({
+          session_id: 1,
+          status: 'approved',
+        }),
+      ).rejects.toThrow(
+        'Cannot complete the review for review session 1 because it is requested_changes',
+      )
+    })
+
     test('performs all actions together (summary + labels + approve)', async () => {
       const startHandler = server.getHandler('start_review')
       await startHandler({ project_id: 'p', mr_iid: 42 })
@@ -641,10 +813,10 @@ describe('Review tool handlers', () => {
       // Verify session is pending_changes (set by add_review_comment)
       expect(statusParsed.session.status).toBe('pending_changes')
 
-      // 4. Complete review (using "closed" — pending_changes is not a valid completion status)
+      // 4. Complete review by formally requesting changes
       const completeResult = await complete({
         session_id: sessionId,
-        status: 'closed',
+        status: 'requested_changes',
         summary_comment: 'Found 2 issues. Please address before merge.',
         labels: ['needs-changes'],
       })
@@ -657,7 +829,7 @@ describe('Review tool handlers', () => {
       // Verify final DB state
       const q = getQueries()
       const finalSession = q.getSessionById(sessionId)
-      expect(finalSession!.status).toBe('closed')
+      expect(finalSession!.status).toBe('requested_changes')
       const items = q.getReviewItemsBySession(sessionId)
       expect(items).toHaveLength(2)
     })

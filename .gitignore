@@ -10,6 +10,7 @@ dist/
 .env.local
 .env.*.local
 *TS.md
+!AGENTS.md
 
 # Database
 *.db

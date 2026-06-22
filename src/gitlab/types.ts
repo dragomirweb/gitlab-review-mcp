@@ -241,6 +241,17 @@ export interface GitLabRepositoryFile {
   commit_id: string
 }
 
+export interface GitLabGraphQLMergeRequestRef {
+  id: string
+  iid: string
+  webUrl: string
+}
+
+export interface GitLabRequestChangesResult {
+  mergeRequest: GitLabGraphQLMergeRequestRef | null
+  errors: string[]
+}
+
 export interface ListMergeRequestsParams {
   state?: 'opened' | 'closed' | 'locked' | 'merged' | 'all'
   labels?: string[]

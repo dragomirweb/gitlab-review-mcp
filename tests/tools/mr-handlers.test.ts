@@ -472,6 +472,29 @@ describe('MR tool handlers', () => {
       )
     })
 
+    test('auto-resolves since_sha from latest completed review session', async () => {
+      const q = getQueries()
+      const session = q.createSession({
+        mr_iid: 42,
+        project_id: 'p',
+        source_branch: 'feature',
+        head_sha: 'reviewed-head',
+      })
+      q.updateSessionStatus(session.id, 'requested_changes')
+
+      const handler = server.getHandler('get_mr_changes_since')
+      await handler({
+        project_id: 'p',
+        mr_iid: 42,
+      })
+
+      expect(mockClient.compareCommits).toHaveBeenCalledWith(
+        'p',
+        'reviewed-head',
+        'head111',
+      )
+    })
+
     test('early-exits when since_sha equals current head', async () => {
       const handler = server.getHandler('get_mr_changes_since')
       const result = await handler({

@@ -53,6 +53,7 @@ export type ReviewStatus =
   | 'in_progress'
   | 'pending_changes'
   | 'approved'
+  | 'requested_changes'
   | 'closed'
 export type ReviewItemType = 'comment' | 'suggestion'
 

@@ -532,7 +532,7 @@ describe('getReviewStatusSchema', () => {
 
 describe('completeReviewSchema', () => {
   test('accepts valid statuses', () => {
-    for (const status of ['approved', 'closed'] as const) {
+    for (const status of ['approved', 'requested_changes', 'closed'] as const) {
       const result = completeReviewSchema.parse({ session_id: 1, status })
       expect(result.status).toBe(status)
     }

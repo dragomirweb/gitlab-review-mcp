@@ -85,6 +85,23 @@ export interface ReviewStatusSummary {
   all_resolved: boolean
 }
 
+function isActiveReviewSession(session: ReviewSession): boolean {
+  return (
+    session.status === 'in_progress' || session.status === 'pending_changes'
+  )
+}
+
+function assertActiveReviewSession(
+  session: ReviewSession,
+  action: string,
+): void {
+  if (isActiveReviewSession(session)) return
+
+  throw new Error(
+    `Cannot ${action} for review session ${session.id} because it is ${session.status}. Start a new review session first.`,
+  )
+}
+
 /**
  * Enrich review items with live GitLab resolution status and developer replies.
  * Cross-references local review items against GitLab discussions to determine
@@ -173,7 +190,7 @@ export function registerReviewTools(server: McpServer): void {
       const mr = await client.getMergeRequest(pid, mr_iid)
       const currentHeadSha = mr.diff_refs?.head_sha ?? null
 
-      // Check for existing active session
+      // Active sessions are writable and can be resumed directly.
       const existingSession = queries.getActiveSessionByMR(pid, mr_iid)
 
       if (existingSession) {
@@ -212,13 +229,49 @@ export function registerReviewTools(server: McpServer): void {
         }
       }
 
+      const previousSession = queries.getLatestSessionByMR(pid, mr_iid)
+
       // Create new session with HEAD SHA
       const session = queries.createSession({
         mr_iid,
         project_id: pid,
         source_branch: mr.source_branch,
         head_sha: currentHeadSha ?? undefined,
+        previous_head_sha: previousSession?.head_sha ?? undefined,
       })
+
+      if (previousSession) {
+        const previousReview = await enrichReviewItems(
+          client,
+          queries,
+          previousSession,
+        )
+        const hasNewCommits =
+          previousSession.head_sha !== null &&
+          currentHeadSha !== null &&
+          currentHeadSha !== previousSession.head_sha
+
+        return {
+          content: [
+            {
+              type: 'text',
+              text: JSON.stringify(
+                {
+                  session,
+                  previous_session: previousSession,
+                  previous_review: previousReview,
+                  is_rereview: true,
+                  resumed_existing_session: false,
+                  has_new_commits: hasNewCommits,
+                  message: `New review session started from previous ${previousSession.status} review. ${previousReview.resolved_items} of ${previousReview.total_items} prior issues resolved, ${previousReview.unresolved_items} still open.${hasNewCommits ? ' New commits detected since last review.' : ''}`,
+                },
+                null,
+                2,
+              ),
+            },
+          ],
+        }
+      }
 
       return {
         content: [
@@ -261,6 +314,7 @@ export function registerReviewTools(server: McpServer): void {
       if (!session) {
         throw new Error(`Review session ${session_id} not found`)
       }
+      assertActiveReviewSession(session, 'add review comments')
 
       // Format content for suggestions
       const body = formatReviewBody(
@@ -342,13 +396,22 @@ export function registerReviewTools(server: McpServer): void {
       const queries = getQueries()
       const client = getGitLabClient()
 
-      // Find session by MR iid or branch
+      // Prefer active sessions, then fall back to the latest historical session.
       let session: ReviewSession | null = null
+      let isActiveSession = true
 
-      if (mr_iid) {
+      if (mr_iid !== undefined) {
         session = queries.getActiveSessionByMR(pid, mr_iid)
+        if (!session) {
+          session = queries.getLatestSessionByMR(pid, mr_iid)
+          isActiveSession = false
+        }
       } else if (branch) {
         session = queries.getActiveSessionByBranch(pid, branch)
+        if (!session) {
+          session = queries.getLatestSessionByBranch(pid, branch)
+          isActiveSession = false
+        }
       }
 
       if (!session) {
@@ -360,7 +423,7 @@ export function registerReviewTools(server: McpServer): void {
                 {
                   found: false,
                   message:
-                    'No active review session found for this merge request or branch.',
+                    'No review session found for this merge request or branch.',
                 },
                 null,
                 2,
@@ -379,11 +442,19 @@ export function registerReviewTools(server: McpServer): void {
             type: 'text',
             text: JSON.stringify(
               {
+                found: true,
                 session,
+                is_active_session: isActiveSession,
                 ...status,
-                message: status.all_resolved
-                  ? 'All review items have been resolved!'
-                  : `${status.unresolved_items} item(s) still need to be resolved.`,
+                message: isActiveSession
+                  ? status.all_resolved
+                    ? 'All review items have been resolved!'
+                    : `${status.unresolved_items} item(s) still need to be resolved.`
+                  : `No active review session found; showing latest ${session.status} session. ${
+                      status.all_resolved
+                        ? 'All review items have been resolved!'
+                        : `${status.unresolved_items} item(s) still need to be resolved.`
+                    }`,
               },
               null,
               2,
@@ -400,7 +471,7 @@ export function registerReviewTools(server: McpServer): void {
     {
       title: 'Complete Review',
       description:
-        'Complete a review session with a final status. Optionally posts a summary comment, sets labels, and approves the MR on GitLab.',
+        'Complete a review session with a final status. Optionally posts a summary comment, sets labels, approves the MR, or requests changes on GitLab.',
       inputSchema: completeReviewSchema,
       annotations: {
         readOnlyHint: false,
@@ -415,14 +486,12 @@ export function registerReviewTools(server: McpServer): void {
       if (!session) {
         throw new Error(`Review session ${session_id} not found`)
       }
-
-      // 1. Update local session status
-      queries.updateSessionStatus(session_id, status)
+      assertActiveReviewSession(session, 'complete the review')
 
       // Track which GitLab actions were performed
       const actions: string[] = []
 
-      // 2. Post summary comment if provided
+      // 1. Post summary comment if provided
       if (summary_comment) {
         await client.createMergeRequestNote(
           session.project_id,
@@ -434,7 +503,7 @@ export function registerReviewTools(server: McpServer): void {
         actions.push('summary_comment_posted')
       }
 
-      // 3. Set labels if provided
+      // 2. Set labels if provided
       if (labels) {
         await client.updateMergeRequestLabels(
           session.project_id,
@@ -442,6 +511,15 @@ export function registerReviewTools(server: McpServer): void {
           labels,
         )
         actions.push('labels_updated')
+      }
+
+      // 3. Request changes if requested
+      if (status === 'requested_changes') {
+        await client.requestMergeRequestChanges(
+          session.project_id,
+          session.mr_iid,
+        )
+        actions.push('changes_requested')
       }
 
       // 4. Approve if requested and status is "approved"
@@ -454,6 +532,9 @@ export function registerReviewTools(server: McpServer): void {
           approveSkipped = true
         }
       }
+
+      // 5. Update local session status after GitLab side effects succeed
+      queries.updateSessionStatus(session_id, status)
 
       const result: Record<string, unknown> = {
         success: true,

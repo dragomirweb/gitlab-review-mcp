@@ -387,10 +387,16 @@ export function registerMergeRequestTools(server: McpServer): void {
       // Resolve the base SHA to compare from
       let baseSha = since_sha
       if (!baseSha) {
-        // Auto-resolve from active review session
+        // Auto-resolve from the active review session first. If no active
+        // review exists, fall back to the latest completed session's HEAD.
         const queries = getQueries()
-        const session = queries.getActiveSessionByMR(pid, mr_iid)
-        baseSha = session?.previous_head_sha ?? undefined
+        const activeSession = queries.getActiveSessionByMR(pid, mr_iid)
+        if (activeSession) {
+          baseSha = activeSession.previous_head_sha ?? undefined
+        } else {
+          const latestSession = queries.getLatestSessionByMR(pid, mr_iid)
+          baseSha = latestSession?.head_sha ?? undefined
+        }
       }
 
       if (!baseSha) {

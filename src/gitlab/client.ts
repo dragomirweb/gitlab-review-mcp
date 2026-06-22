@@ -21,6 +21,7 @@ import type {
   GitLabNote,
   GitLabPipeline,
   GitLabProject,
+  GitLabRequestChangesResult,
   GitLabRepositoryFile,
   ListMergeRequestsParams,
 } from './types'
@@ -30,6 +31,19 @@ const DEFAULT_MAX_RETRIES = 3
 
 /** Base delay in milliseconds for exponential backoff (1s, 2s, 4s). */
 const BASE_RETRY_DELAY_MS = 1000
+
+interface GitLabGraphQLError {
+  message: string
+}
+
+interface GitLabGraphQLResponse<TData> {
+  data?: TData
+  errors?: GitLabGraphQLError[]
+}
+
+interface RequestChangesMutationData {
+  mergeRequestRequestChanges: GitLabRequestChangesResult | null
+}
 
 export class GitLabClient {
   private baseUrl: string
@@ -95,6 +109,58 @@ export class GitLabClient {
       durationMs,
     })
     return response.json() as Promise<T>
+  }
+
+  /**
+   * Low-level GraphQL request helper. GitLab exposes review state mutations
+   * such as "request changes" only through GraphQL, not the REST approvals API.
+   */
+  private async graphqlRequest<TData>(
+    query: string,
+    variables: Record<string, unknown>,
+  ): Promise<TData> {
+    const url = `${this.baseUrl}/api/graphql`
+    const start = performance.now()
+
+    const response = await fetch(url, {
+      method: 'POST',
+      headers: {
+        [this.authHeader.name]: this.authHeader.value,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({ query, variables }),
+    })
+
+    const durationMs = Math.round(performance.now() - start)
+
+    if (!response.ok) {
+      const errorBody = await response.text()
+      logger.debug('graphql_request', {
+        statusCode: response.status,
+        durationMs,
+      })
+      throw new GitLabApiError(response.status, errorBody)
+    }
+
+    logger.debug('graphql_request', {
+      statusCode: response.status,
+      durationMs,
+    })
+
+    const payload = (await response.json()) as GitLabGraphQLResponse<TData>
+    if (payload.errors?.length) {
+      throw new Error(
+        `GitLab GraphQL error: ${payload.errors
+          .map((error) => error.message)
+          .join('; ')}`,
+      )
+    }
+
+    if (!payload.data) {
+      throw new Error('GitLab GraphQL response did not include data')
+    }
+
+    return payload.data
   }
 
   /**
@@ -433,6 +499,47 @@ export class GitLabClient {
       'POST',
       `/projects/${this.encodeProjectId(projectId)}/merge_requests/${mrIid}/unapprove`,
     )
+  }
+
+  /**
+   * Formally request changes on a merge request by updating the authenticated
+   * reviewer's GitLab review state. The caller must be a reviewer on the MR.
+   */
+  async requestMergeRequestChanges(
+    projectId: string,
+    mrIid: number,
+  ): Promise<GitLabRequestChangesResult> {
+    const project = await this.getProject(projectId)
+    const query = `
+      mutation RequestMergeRequestChanges($projectPath: ID!, $iid: String!) {
+        mergeRequestRequestChanges(input: { projectPath: $projectPath, iid: $iid }) {
+          errors
+          mergeRequest {
+            id
+            iid
+            webUrl
+          }
+        }
+      }
+    `
+
+    const data = await this.graphqlRequest<RequestChangesMutationData>(query, {
+      projectPath: project.path_with_namespace,
+      iid: mrIid.toString(),
+    })
+    const result = data.mergeRequestRequestChanges
+
+    if (!result) {
+      throw new Error('GitLab did not return a request-changes result')
+    }
+
+    if (result.errors.length > 0) {
+      throw new Error(
+        `GitLab request changes failed: ${result.errors.join('; ')}`,
+      )
+    }
+
+    return result
   }
 
   // Discussion management endpoints

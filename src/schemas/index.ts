@@ -130,7 +130,7 @@ export const getMrChangesSinceSchema = MrParamsSchema.extend({
     .string()
     .optional()
     .describe(
-      'Base SHA to compare from. If not provided, automatically uses the previous_head_sha from the active review session.',
+      'Base SHA to compare from. If not provided, uses previous_head_sha from the active review session or head_sha from the latest completed session.',
     ),
 })
 
@@ -343,9 +343,9 @@ export const getReviewStatusSchema = ProjectParamsSchema.extend({
 export const completeReviewSchema = z.object({
   session_id: sessionIdSchema,
   status: z
-    .enum(['approved', 'closed'])
+    .enum(['approved', 'requested_changes', 'closed'])
     .describe(
-      'Final review status (pending_changes is set automatically by add_review_comment)',
+      'Final review status. Use requested_changes to formally request changes in GitLab.',
     ),
   summary_comment: z
     .string()

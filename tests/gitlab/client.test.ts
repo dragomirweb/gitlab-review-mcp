@@ -575,6 +575,122 @@ describe('GitLabClient', () => {
     })
   })
 
+  describe('requestMergeRequestChanges', () => {
+    test('sends GraphQL mutation with project full path and MR IID', async () => {
+      const client = createTestClient()
+      const calls: Array<{
+        url: string
+        method: string
+        body?: string
+        headers: Record<string, string>
+      }> = []
+
+      mockFetchWith(async (url: string, init?: RequestInit) => {
+        calls.push({
+          url,
+          method: init?.method || '',
+          body: init?.body as string | undefined,
+          headers: Object.fromEntries(
+            Object.entries((init?.headers as Record<string, string>) || {}),
+          ),
+        })
+
+        if (url.includes('/api/v4/projects/')) {
+          return mockResponse({
+            id: 10,
+            name: 'project',
+            path_with_namespace: 'group/project',
+            merge_method: 'merge',
+            web_url: 'https://gitlab.example.com/group/project',
+          })
+        }
+
+        return mockResponse({
+          data: {
+            mergeRequestRequestChanges: {
+              errors: [],
+              mergeRequest: {
+                id: 'gid://gitlab/MergeRequest/1',
+                iid: '42',
+                webUrl:
+                  'https://gitlab.example.com/group/project/-/merge_requests/42',
+              },
+            },
+          },
+        })
+      })
+
+      const result = await client.requestMergeRequestChanges('10', 42)
+
+      expect(calls).toHaveLength(2)
+      expect(calls[1].url).toBe('https://gitlab.example.com/api/graphql')
+      expect(calls[1].method).toBe('POST')
+      expect(calls[1].headers['PRIVATE-TOKEN']).toBe('test-token')
+
+      const body = JSON.parse(calls[1].body!)
+      expect(body.query).toContain('mergeRequestRequestChanges')
+      expect(body.variables).toEqual({
+        projectPath: 'group/project',
+        iid: '42',
+      })
+      expect(result.errors).toEqual([])
+      expect(result.mergeRequest?.iid).toBe('42')
+    })
+
+    test('throws when GraphQL returns top-level errors', async () => {
+      const client = createTestClient()
+
+      mockFetchWith(async (url: string) => {
+        if (url.includes('/api/v4/projects/')) {
+          return mockResponse({
+            id: 10,
+            name: 'project',
+            path_with_namespace: 'group/project',
+            merge_method: 'merge',
+            web_url: 'https://gitlab.example.com/group/project',
+          })
+        }
+
+        return mockResponse({
+          errors: [{ message: 'Field does not exist' }],
+        })
+      })
+
+      await expect(client.requestMergeRequestChanges('p', 42)).rejects.toThrow(
+        'GitLab GraphQL error: Field does not exist',
+      )
+    })
+
+    test('throws when GitLab rejects request changes mutation', async () => {
+      const client = createTestClient()
+
+      mockFetchWith(async (url: string) => {
+        if (url.includes('/api/v4/projects/')) {
+          return mockResponse({
+            id: 10,
+            name: 'project',
+            path_with_namespace: 'group/project',
+            merge_method: 'merge',
+            web_url: 'https://gitlab.example.com/group/project',
+          })
+        }
+
+        return mockResponse({
+          data: {
+            mergeRequestRequestChanges: {
+              errors: ['Reviewer not found'],
+              mergeRequest: null,
+            },
+          },
+        })
+      })
+
+      await expect(client.requestMergeRequestChanges('p', 42)).rejects.toThrow(
+        'GitLab request changes failed: Reviewer not found',
+      )
+    })
+  })
+
   describe('getMergeRequestPipelines', () => {
     test('builds correct paginated URL', async () => {
       const client = createTestClient()
